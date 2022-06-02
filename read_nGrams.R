@@ -1,7 +1,3 @@
-setwd("~/Downloads/Coursera-DataScience-Capstone/kelvin")
-
-#rm(list=ls())
-
 library(stringi)                # character string processing package 
 library(stringr)
 library(dplyr)                  # a grammar of data manipluation 
