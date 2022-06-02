@@ -1,0 +1,550 @@
+---
+title: "Data Science Capstone Final Project: Next Word Prediction" 
+author: "Kelvin Leung"
+date: "May 29, 2020"
+output: html_document
+---
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning = FALSE)
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning = FALSE)
+```
+
+### Introduction
+This project was the last project of a 10 course Data Science track given by Johns Hopkins University. It was about a next-word prediction algorithm. A shiny app is used to demonstrate such word prediction algorithm. It takes an input as a phrase (i.e. multiple words) in a text box and outputs a prediction of the next word accordingly. Swiftkey, an industrial partner, had provided us with the data. It can be downloaded [here](<https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip).
+
+
+The job was to clean and analyze a large corpus of unstructured text and build a word prediction model on the web using shiny library in R. Since the corpus is too large, we had created the samples for twitter, news, and blogs and then we combined these samples (8000 lines samples on each type of data) into a combined corpus. We then created tokens of the corpus by removing the punctuation, symbols, numbers, url and profanity words that can be downloaded from the web. After that, we generated n-gram words (4-gram word, 3-gram word, 2-gram word, and unigram word) and save them into R objects for faster lookup. We implemented a version of [*stupid backoff algorithm* ](https://www.aclweb.org/anthology/D07-1090.pdf) for next word prediction and the prediction is based on the ranked sample frequency of those words. For a given phrase, we tokenized it first like the way we generated n-gram word files. Then, we looked up next word based on first n-1 grams. For example, if the input phrase contains 3-grams, we will match the first three gram in the 4-gram table. If there are a match of the first 3-grams, we simply return the 4th-gram based on maximizing the frequency of occurrence in those filtered set of words. If there is no match, we simply use the last two-gram to do that word prediction. The process is recursively done and may end up with having 1-gram word in the worse case scenario. The result seems make sense for many simple input phrases like "I love", or "One of the", etc. Note, the accuracy of the prediction of next word purely depends on the sample we created.
+
+
+### Loading essential R libraries
+```{r include-library}
+rm(list=ls())                   # remove all objects 
+
+library(tm)                     # Text Mining Package
+library(stringi)                # character string processing package 
+library(dplyr)                  # a grammar of data manipluation 
+library(qdap)                   # quantitative discourse analysis package
+library(knitr)                  # a general purpose tool for dynamic report generation in R
+library(quanteda)               # Quantitative Analysis of Textual Data
+library(quanteda.textplots)     # Plots for the Quantitative Analysis of Textual Data
+library(quanteda.textstats)     # Textual Statistics for the Quantitative Analysis of Textual Data
+library(ggplot2)                # Create Elegant Data Visualisations Using the Grammar of Graphics
+library(plotly)                 # interactive web graphics using plotly.js
+library(RColorBrewer)           # ColorBrewer Palettes
+library(ggeasy)                 # Easy Access to 'ggplot2' Commands
+library(data.table)             # Extension of `data.frame`
+library(rapportools)            # misc helper functions with sane defaults for reporting
+```
+
+
+
+
+### Reading input files
+```{r reading-files}
+enUSdir <- "./data/en_US/"        # dir contains files encoded in English 
+bWDsdir <- "./data/badWords/"     # bad words
+tmpdir <- "./tmpData/"            # temp directory for the output intermediate files
+
+con_enUS_twitter <- paste0(enUSdir, "en_US.twitter.txt", sep = '')  # twitter file connection
+con_enUS_blog <- paste0(enUSdir, "en_US.blogs.txt", sep = '')       # US blog file connection
+con_enUS_news <- paste0(enUSdir, "en_US.news.txt", sep = '')        # US news file connection
+con_badWords <- paste0(bWDsdir, "profanity.txt", sep = '')          # profanity words file connection
+
+twitter_file <- file(con_enUS_twitter, 'rb')    # twitter file desc, it needs to be closed when done
+blog_file <- file(con_enUS_blog, 'rb')          # blog file desc, it needs to be closed when done
+news_file <- file(con_enUS_news, 'rb')          # news file desc, it needs to be closed when done
+badwords_file <- file(con_badWords, 'rb')       # bad words file desc, it needs to be closed when done
+
+twitter_file_MB <- round(file.info(con_enUS_twitter)$size/(1024*1024), digits = 3)
+blog_file_MB <- round(file.info(con_enUS_blog)$size/(1024*1024), digits = 3)
+news_file_MB <- round(file.info(con_enUS_news)$size/(1024*1024), digits = 3)
+badwords_file_MB <- round(file.info(con_badWords)$size/(1024*1024), digits = 3)
+
+print.noquote(paste0("File size (MB): [twitter]=", twitter_file_MB, 
+                     " [blogs]=", blog_file_MB, " [news]=", news_file_MB, sep = ''))
+print.noquote(paste0("File size (MB): [badwords]= ", badwords_file_MB, sep=''))
+
+# for twitter
+twitter_lines <- readLines(con = twitter_file, encoding = "UTF-8", skipNul = TRUE)
+# close twitter_file descriptor 
+close(twitter_file) 
+
+# for blogs
+blogs_lines <- readLines(blog_file, encoding = "UTF-8", skipNul = TRUE)
+# close blog_file descriptor
+close(blog_file) 
+
+# for news
+news_lines <- readLines(news_file, encoding = "UTF-8", skipNul = TRUE)
+# close news_file descriptor
+close(news_file) 
+
+# for badwords 
+badwords_lines <- readLines(badwords_file, encoding = "UTF-8", skipNul = TRUE)
+# close badwords_file descriptor
+close(badwords_file)
+
+# using stri_stats_general to find out the general statistics of those files
+stats_twitter <- stri_stats_general(twitter_lines)
+stats_blogs <- stri_stats_general(blogs_lines)
+stats_news <- stri_stats_general(news_lines)
+#stats_badwords <- stri_stats_general(badwords_lines)
+
+# using stri_stats_latex to find out the num of words in those files
+# words_twitter[4] is the word count in twitter and so forth
+# 
+words_twitter <- stri_stats_latex(twitter_lines)
+words_blogs <- stri_stats_latex(blogs_lines)
+words_news <- stri_stats_latex(news_lines)
+```
+
+
+### Overall Statistics of the input data
+```{r Overall statstics of the input data}
+overall_statistics <- data.frame(
+  FileNames = c("en_US.twitter", "en_US.blogs", "en_US.news"),
+  FileSizeInMB = c(twitter_file_MB, blog_file_MB, news_file_MB),
+  rbind(stats_twitter, stats_blogs, stats_news),
+  WordCount <- rbind(words_twitter[4], words_blogs[4], words_news[4])
+) 
+rownames(overall_statistics) <- c("1", "2", "3")
+
+kable(overall_statistics)
+
+rm(words_twitter, words_blogs, words_news)
+rm(overall_statistics)
+```
+
+
+
+## Saving the profanity words into a R object
+```{r output-badword-rds}
+# save badwords_lies to rds file
+saveRDS(badwords_lines, "badwords.rds")
+```
+
+
+
+## R auxilary functions
+```{r auxilary-functions}
+# ------------------------------
+# aux functions for text mininig
+removeURL <- function(x) gsub("(f|ht)tp(s?)://\\S+", "", x, perl = T)
+removeSign <- function(x) gsub("[[:punct:]]", "", x)
+removeAspo <- function(x) gsub("'", "", x)
+removeNum <- function(x) gsub("[[:digit:]]","", x)
+removeUTF8_ASCII <- function(x) iconv(x, "UTF-8", "ASCII", sub = "")
+#removeNonASCII <- function(x) iconv(x, "latin1", 'ASCII', sub = "")
+removeTH <- function(x) gsub(" th", "", x)
+```
+
+
+
+### Create sample data and combine them into one
+```{r sample-input-data}
+# ----------------------------
+# initial and set seed for reproducible purpose
+SEED = 1520
+set.seed(SEED) 
+
+# set the random sample size for training
+N = 8000
+# Randomly selected N from the original data sets for training
+twitter_Samples <- sample(twitter_lines, size = N, replace = FALSE)
+blogs_Samples <- sample(blogs_lines, size = N, replace = FALSE)
+news_Samples <- sample(news_lines, size = N, replace = FALSE)
+
+# -------------
+# Randomly selected N from the original data sets
+num_twitter_lines = length(twitter_lines)
+num_news_lines = length(news_lines)
+num_blogs_lines = length(blogs_lines)
+
+# assuming num_twitter_lines is much greater than N
+tw_sample_idx = sample.int(num_twitter_lines, size=N, replace=FALSE)
+twitter_Samples <- twitter_lines[tw_sample_idx]
+# assuming num_blogs_lines is much greater than N
+blogs_sample_idx = sample.int(num_blogs_lines, size=N, replace=FALSE)
+blogs_Samples <- blogs_lines[blogs_sample_idx]
+# assuming num_news_lines is much greater than N
+news_sample_idx = sample.int(num_news_lines, size=N, replace=FALSE)
+news_Samples <- news_lines[news_sample_idx]
+
+# combining all input data samples for training and testing
+combinedSampleData <- c(twitter_Samples, blogs_Samples, news_Samples)
+
+twitter_Samples_test <- sample(twitter_lines[-tw_sample_idx], size = N, replace=FALSE)
+blogs_Samples_test <- sample(blogs_lines[-blogs_sample_idx], size = N, replace=FALSE)
+news_Samples_test <- sample(news_lines[-news_sample_idx], size = N, replace=FALSE)
+combinedSampleData_test <- c(twitter_Samples_test, blogs_Samples_test, news_Samples_test)
+
+# ---------------
+
+# output training samples to a file for debugging purpose
+writeLines(twitter_Samples, paste0(tmpdir, 'twitter_Samples_org.txt', sep = ''), useBytes = F)
+writeLines(blogs_Samples, paste0(tmpdir, 'blogs_Samples_org.txt', sep = ''), useBytes = F)
+writeLines(news_Samples, paste0(tmpdir, 'news_Samples_org.txt', sep = ''), useBytes = F)
+
+# remove objects to free up some space
+rm(tw_sample_idx, news_sample_idx, blogs_sample_idx)
+rm(twitter_lines, news_lines, blogs_lines)
+
+rm(twitter_Samples, blogs_Samples, news_Samples)
+rm(twitter_Samples_test, blogs_Samples_test, news_Samples_test)
+rm(WordCount)
+# 
+
+```
+
+
+
+### Tokneizer and N-Gram Modelling
+```{r tokenizer}
+#
+# Tokenization and N-Gram Modelling
+#
+
+combinedSampleData <- sapply(combinedSampleData, removeUTF8_ASCII)
+combinedSampleData <- gsub("[^a-zA-Z ]", "", combinedSampleData)
+attr(combinedSampleData, 'names') <- seq(1:length(combinedSampleData))
+
+# corpus for combinedSampleData
+corp <- corpus(combinedSampleData)
+
+# tokenize the corpus 
+# - remove punctuation
+# - remove symbols
+# - remove numbers
+# - remote url
+# - remove badwords (profanity words)
+toks <- tokens_tolower(
+              tokens(corp, remove_punct = TRUE, 
+                     remove_symbols = TRUE, 
+                     remove_numbers = TRUE,
+                     remove_url = TRUE) %>%  
+                     tokens_remove(badwords_lines) 
+                      )
+# remove stopwords in token
+#toks <- tokens_remove(toks, stopwords("english"))
+
+```
+
+
+
+### Document-feature matrix
+```{r input-tokens}
+
+mydfm <- dfm(toks, tolower = TRUE) %>% 
+  dfm_remove(pattern = c(stopwords("en")))  %>%
+  dfm_remove(pattern = c("rt")) %>% 
+  dfm_wordstem(language = quanteda_options("language_stemmer"))
+
+```
+
+
+
+### Visualize document-feature matrix 
+```{r visualize-dfm}
+# Visualization mydfm using textplot_wordcloud and feature plot
+textplot_wordcloud(mydfm,  min_size = 1, max_size = 3, max_words = 100, rotation=0.25, color=rev(brewer.pal(11, "RdBu")))
+
+```
+
+
+# Plotting top 30 features plot from mydfm
+```{r visualize-top-30 features}
+features_mydfm <- textstat_frequency(mydfm, n=30)
+features_mydfm$feature <- with(features_mydfm, reorder(feature, frequency))
+
+p <- ggplot(data = features_mydfm, 
+            aes(x = feature, y = frequency)) + geom_bar(stat="identity", fill = 'red') +
+            labs(x = "Word", y = "Frequency") +
+            theme(axis.text.x = element_text(angle=90, hjust=1)) + coord_flip()
+ggplotly(p)
+
+```
+
+
+## Plot n features function
+```{r plot-n-features}
+# plotting n features (words)
+plot_n_features <- function(dfm, N=15, title_txt = "", col="red") {
+    stopifnot(is.dfm((dfm)))
+    stopifnot((N > 0 && N < nfeat(dfm)))
+    
+    ttext = title_txt
+    dfm %>%
+      textstat_frequency(n=N) %>% 
+      ggplot(aes(x = reorder(feature, frequency), y = frequency)) +
+      geom_bar(stat = "identity", fill = col) +
+      coord_flip() +
+      labs(x = "Word", y = "Frequency") +
+      ggtitle(ttext) + 
+      ggeasy::easy_center_title()
+}
+
+```
+
+
+
+### Create n-grams 
+```{r n-grams-creation}
+
+# unigram tokens
+unigram <- tokens_ngrams(toks, n=1, concatenator = " ")
+unigram <- tokens_tolower(unigram)
+dfm_unigram <- dfm(unigram, tolower = TRUE)
+dfm_unigram <- dfm_sort(dfm_unigram, decreasing = TRUE, margin=c("features"))
+# obtain the weight of features based on prop scheme in the dfm_unigram
+dfm_unigram_prop <- dfm_weight(dfm_unigram, scheme = "prop")
+sortedFeatProp <-topfeatures(dfm_unigram_prop, nfeat(dfm_unigram_prop))
+# TODO: fixed this; w1 <-sapply(strsplit(fourgram_DF$nextWord, ' '), fixed = TRUE), '[[', 1)
+#                   w2 <-sapply(strsplit(fourgram_DF$nextWord, ' '), fixed = TRUE), '[[', 2)
+unigram_DF <- data.frame(row.names = NULL, "nextWord" = names(sortedFeatProp), "Prop" = sortedFeatProp)
+
+
+plot_n_features(dfm_unigram, title_txt = "Top 15 Unigram words")
+textplot_wordcloud(dfm_unigram,  min_size = 1, max_size = 3, max_words = 100,  rotation=0.25, color=rev(brewer.pal(11, "RdBu")))
+
+bigram <- tokens_ngrams(toks, n=2, concatenator = " ")
+bigram <- tokens_tolower(bigram)
+dfm_bigram <- dfm(bigram, tolower = TRUE)
+dfm_bigram <- dfm_sort(dfm_bigram, decreasing = TRUE, margin=c('features'))
+# obtain the weight of features based on prop scheme in the dfm_bigram
+dfm_bigram_prop <- dfm_weight(dfm_bigram, scheme = "prop")
+sortedFeatProp <-topfeatures(dfm_bigram_prop, nfeat(dfm_bigram_prop))
+bigram_DF <- data.frame(row.names = NULL, "nextWord" = names(sortedFeatProp), "Prop" = sortedFeatProp)
+
+plot_n_features(dfm_bigram, title_txt = "Top 15 Bigram words")
+textplot_wordcloud(dfm_bigram, min_size = 1, max_size = 3, max_words = 100, rotation=0.25, color=rev(brewer.pal(11, "RdBu")))
+
+trigram <- tokens_ngrams(toks, n=3, concatenator = " ")
+trigram <- tokens_tolower(trigram)
+dfm_trigram <- dfm(trigram, tolower = TRUE)
+dfm_trigram <- dfm_sort(dfm_trigram, decreasing = TRUE, margin=c('features'))
+# obtain the weight of features based on prop scheme in the dfm_trigram
+dfm_trigram_prop <- dfm_weight(dfm_trigram, scheme = "prop")
+sortedFeatProp <-topfeatures(dfm_trigram_prop, nfeat(dfm_trigram_prop))
+trigram_DF <- data.frame(row.names = NULL, "nextWord" = names(sortedFeatProp), "Prop" = sortedFeatProp)
+
+
+plot_n_features(dfm_trigram, title_txt = "Top 15 Trigram words")
+textplot_wordcloud(dfm_trigram,  min_size = 1, max_size = 3, max_words = 100, rotation=0.25, color=rev(brewer.pal(11, "RdBu")))
+
+fourgram <- tokens_ngrams(toks, n=4, concatenator = " ")
+fourgram <- tokens_tolower(fourgram)
+dfm_fourgram <- dfm(fourgram, tolower = TRUE)
+dfm_fourgram <- dfm_sort(dfm_fourgram, decreasing = TRUE, margin=c('features'))
+# obtain the weight of features based on prop scheme in the dfm_trigram
+dfm_fourgram_prop <- dfm_weight(dfm_fourgram, scheme = "prop")
+sortedFeatProp <-topfeatures(dfm_fourgram_prop, nfeat(dfm_fourgram_prop))
+fourgram_DF <- data.frame(row.names = NULL, "nextWord" = names(sortedFeatProp), "Prop" = sortedFeatProp)
+
+plot_n_features(dfm_fourgram, title_txt = "Top 15 Fourgram words")
+textplot_wordcloud(dfm_fourgram,  min_size = 1, max_size = 3, max_words = 100, rotation=0.25, color=rev(brewer.pal(11, "RdBu")))
+```
+
+```{r output-n-grams-DF}
+# output all the DFs  unigram_DF, bigram_DF, trigram_DF, fourgram_DF
+write.table(unigram_DF, file = "unigram.csv", quote=FALSE, append=FALSE, row.names = FALSE, col.names = FALSE, sep=',')
+write.table(bigram_DF, file = "bigram.csv", quote=FALSE, append=FALSE, row.names = FALSE, col.names = FALSE, sep=',')
+write.table(trigram_DF, file = "trigram.csv", quote=FALSE, append=FALSE, row.names = FALSE, col.names = FALSE, sep=',')
+write.table(fourgram_DF, file = "fourgram.csv", quote=FALSE, append=FALSE, row.names = FALSE, col.names = FALSE, sep=',')
+```
+
+
+
+```{r countSpaces}
+countSpaces <- function(s) { sapply(gregexpr(" ", s), function(p) { sum(p>=0) } ) }
+```
+
+```{r split-DF-featurewords}
+splitDF_FeatureWords <- function(dm) {
+  if ( !(is.data.frame(dm)) )
+   return(NULL)
+
+  tags <- as.vector(dm$nextWord)
+  if (length(tags) <= 0)
+    return(NULL)
+  
+  nCol = countSpaces(tags)
+  numCol <- unique(nCol)+1
+  colTag = "word_"
+
+  cname = character(0)
+  for (i in seq(from = 1, to = numCol)) {
+      cname <- append(cname, paste0(colTag, i, sep=''))
+  }
+  
+  output = data.table( sapply(strsplit(tags, " ", fixed = TRUE), '[[', 1))
+  if (numCol > 1) {
+    for (i in seq(from = 2, to = length(cname) ) ) {
+      output <- cbind(output, data.table( sapply(strsplit(tags, " ", fixed = TRUE), '[[', i)) )
+    }
+  }
+
+  setnames(output, cname)
+  output <- cbind(output, "Prop" = dm$Prop )
+  
+  if (numCol == 1)
+    setnames(output, 1, "nextWord")
+  else if (numCol > 1) 
+    setnames(output, ncol(output)-1, "nextWord")
+    
+  return(output)
+}
+```
+
+
+
+## Create n-gram words for lookup
+```{r get-n-words}
+
+# Create data tables with individual words as columns
+uni_words <- splitDF_FeatureWords(unigram_DF)
+bi_words <- splitDF_FeatureWords(bigram_DF)
+tri_words <- splitDF_FeatureWords(trigram_DF)
+four_words <- splitDF_FeatureWords(fourgram_DF)
+
+# create key on a data.table
+setkey(uni_words, nextWord)
+setkey(bi_words, word_1, nextWord)
+setkey(tri_words, word_1, word_2, nextWord)
+setkey(four_words, word_1, word_3, word_3, nextWord)
+
+# write them into files
+con_unigrams <- paste0(tmpdir, "unigram.txt", sep = '')  # unigram filename
+con_bigrams <- paste0(tmpdir, "bigram.txt", sep='')      # bigram filename
+con_trigrams <- paste0(tmpdir, "trigram.txt", sep='')    # trigram filename
+con_fourgrams <- paste0(tmpdir, "fourgram.txt", sep='')  # fourgram filename
+write.table(uni_words, file=con_unigrams, append=FALSE, sep=",", row.names = FALSE, col.names = FALSE, quote=FALSE)
+write.table(bi_words, file=con_bigrams, append=FALSE, sep=",", row.names = FALSE, col.names = FALSE, quote=FALSE)
+write.table(tri_words, file=con_trigrams, append=FALSE, sep=",", row.names = FALSE, col.names = FALSE, quote=FALSE)
+write.table(four_words, file=con_fourgrams, append=FALSE, sep=",", row.names = FALSE, col.names = FALSE, quote=FALSE)
+```
+
+
+```{r output-n-words-rds}
+# output ngrams to rds files
+saveRDS(uni_words, file = "uni_words.rds")
+saveRDS(bi_words, file = "bi_words.rds")
+saveRDS(tri_words, file='tri_words.rds')
+saveRDS(four_words, file='four_words.rds')
+```
+
+```{r myfreq}
+b <- function(sen) {
+  t <- tolower(sen)
+  m<- paste(tail(unlist(strsplit(t,' ')),3), collapse=" ")
+  return(m)  
+}
+  
+myfreq = function(x, minCount = 1) {
+  x = x %>%
+    group_by(nextWord) %>%
+    summarize(count = n()) %>%
+    filter(count >= minCount)
+  x = x %>% 
+    mutate(freq = count / sum(x$count)) %>% 
+    select(-count) %>%
+    arrange(desc(freq))
+}
+```
+
+
+
+### Next Word Prediction 
+```{r predict-next-word}
+predict_next_word <- function(input, n=10) {
+  # check the input to see if it it empty
+  if (rapportools::is.empty(input)) {
+    prediction = uni_words %>% select(nextWord, Prop) %>% arrange(Prop)     
+    print.noquote("empty input")
+    return (prediction[1:n,])
+  }
+  #now, input is not empty
+  corp <- corpus(input)
+  # tokenize the input
+  txt <- tokens_tolower(
+    tokens(corp, what = "word1",
+           remove_punct = TRUE,
+           remove_symbols = TRUE,
+           remove_numbers = TRUE,
+           remove_url = TRUE) %>%
+      tokens_remove(badwords_lines))
+  
+  parsedInput = as.list(txt)$text1
+  #
+  plen = length(parsedInput)
+  #
+  #print.noquote(paste0("Input: ", parsedInput, sep=''))
+  #print.noquote(paste0("Length: ", plen, sep=''))
+  
+  if (parsedInput[1] %in% four_words$word_1 &
+      parsedInput[2] %in% four_words$word_2 &
+      parsedInput[3] %in% four_words$word_3) {
+    print.noquote("Use fourgram")
+    prediction = four_words %>% filter(word_1 %in% parsedInput[1] &
+                                         word_2 %in% parsedInput[2] &
+                                         word_3 %in% parsedInput[3]) %>%
+      select(nextWord, Prop) %>% 
+      arrange(desc(Prop)) 
+    # if nextWord is NA, it will use n-1 gram to predict
+    if (is.na(prediction$nextWord[1])) {
+      # use n-1 to predict = trigram in this case
+      parsedInput_1 = paste(parsedInput[2], parsedInput[3], sep = ' ') 
+      prediction = predict_next_word(parsedInput_1)
+    }
+    
+  } else if (parsedInput[1] %in% tri_words$word_1 &
+             parsedInput[2] %in% tri_words$word_2) {
+    print.noquote("Use trigram")                  
+    prediction = tri_words %>% filter(word_1 %in% parsedInput[1] &
+                                        word_2 %in% parsedInput[2]) %>%
+      select(nextWord, Prop) %>% 
+      arrange(desc(Prop))
+    # if nextWord is NA, it will use n-1 gram to predict
+    if (is.na(prediction$nextWord[1])) {
+      # use n-1 to predict = bigram in this case
+      parsedInput_1 = paste(parsedInput[2]) 
+      prediction = predict_next_word(parsedInput_1)
+    }
+    
+  } else if (parsedInput[1] %in% bi_words$word_1) {
+    print.noquote("Use bigram")        
+    prediction = bi_words %>% filter(word_1 %in% parsedInput[1]) %>%
+      select(nextWord, Prop) %>%
+      arrange(desc(Prop)) 
+    
+  } else {
+    print.noquote("Use unigram inside")        
+    prediction = uni_words %>% select(nextWord, Prop) %>%  
+      arrange(desc(Prop))
+  }
+  
+  return(prediction[1:n,])
+}
+
+```
+
+
+
+### Example of next word prediction (select top-5 only):
+```{r test-prediction}
+text = "the rest of"
+print.noquote(text)
+predict_next_word(text)[1:5]
+
+text = "One of the"
+print.noquote(text)
+predict_next_word(text)[1:5]
+
+text = "I love"
+print.noquote(text)
+predict_next_word(text)[1:5]
+
+text = "honey"
+print.noquote(text)
+predict_next_word(text)[1:5]
+```
+
