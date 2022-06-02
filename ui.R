@@ -17,7 +17,7 @@ shinyUI(
       sidebarLayout(
         sidebarPanel(
           # sliderInput 
-          textInput("inputId", label="Enter input phrase:", NULL),
+          textInput("inputId", label="Enter input phrase:", "I love"),
           verbatimTextOutput("inputText"),   
           sliderInput("numWords",
                       "Number of words:",
